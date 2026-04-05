@@ -18,6 +18,24 @@ Series metadata is written only once per unique series using a two-layer strateg
 
 Cache hits and misses are tracked via OTel counters. On process restart the cache is cold and each series is re-inserted once, which is safe.
 
+## Known limitations
+
+### Histogram, ExponentialHistogram, and Summary metrics
+
+The ClickHouse tables for these metric types are created at startup but no Go types, mappers, or insert methods exist for them. Any incoming histogram or summary data points are silently discarded. These tables also use the pre-refactor schema (all metadata columns inline, no `SeriesID`), which is inconsistent with the gauge/sum design. Implementing these types is straightforward but was out of scope for the current work.
+
+### Unbounded in-process series cache
+
+The in-process `sync.Map` that deduplicates series inserts has no eviction policy. This is safe when series cardinality is bounded (as is typical for well-labelled infrastructure metrics), but if label values contain high-entropy data (e.g. request IDs, user IDs) the cache will grow without bound and cause unbounded heap growth. In that case the cache should be replaced with an LRU of a fixed capacity.
+
+### No cross-replica cache coordination
+
+Each replica maintains its own in-process series cache. After a deployment or failover, the new instance starts cold and re-inserts every series once. `ReplacingMergeTree` deduplicates these on background merges, so correctness is preserved, but write amplification at startup is proportional to total series cardinality.
+
+### No transactional series + data-point writes
+
+ClickHouse does not support multi-table transactions. Series rows are written before data-point rows to minimise the window where a data point exists without its series metadata, but a partial failure (series written, data-point write fails) leaves an orphaned series row. The inverse (data point written before series) cannot happen because the series insert is always attempted first.
+
 ## Prerequisites
 
 - Go 1.26+
