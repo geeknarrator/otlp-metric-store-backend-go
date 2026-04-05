@@ -28,7 +28,7 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 
 const createGaugeSeriesTableSQL = `
 CREATE TABLE IF NOT EXISTS otel_metrics_gauge_series (
-    SeriesID              UInt64,
+    SeriesID              UInt64        CODEC(ZSTD(1)),
     ResourceAttributes    Map(LowCardinality(String), String) CODEC(ZSTD(1)),
     ResourceSchemaUrl     String CODEC(ZSTD(1)),
     ScopeName             LowCardinality(String) CODEC(ZSTD(1)),
@@ -55,7 +55,7 @@ SETTINGS index_granularity = 8192;
 
 const createSumSeriesTableSQL = `
 CREATE TABLE IF NOT EXISTS otel_metrics_sum_series (
-    SeriesID              UInt64,
+    SeriesID              UInt64        CODEC(ZSTD(1)),
     ResourceAttributes    Map(LowCardinality(String), String) CODEC(ZSTD(1)),
     ResourceSchemaUrl     String CODEC(ZSTD(1)),
     ScopeName             LowCardinality(String) CODEC(ZSTD(1)),

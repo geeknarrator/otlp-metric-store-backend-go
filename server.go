@@ -116,6 +116,8 @@ func main() {
 }
 
 func run() (err error) {
+	flag.Parse()
+
 	slog.SetDefault(logger)
 	logger.Info("Starting application")
 
@@ -127,8 +129,6 @@ func run() (err error) {
 	defer func() {
 		err = errors.Join(err, otelShutdown(context.Background()))
 	}()
-
-	flag.Parse()
 
 	ctx := context.Background()
 
