@@ -37,6 +37,33 @@ type SumRow struct {
 	IsMonotonic            bool
 }
 
+// GaugeSeriesRow holds the metadata that identifies a unique gauge series.
+// It is inserted into otel_metrics_gauge_series, which uses ReplacingMergeTree
+// to deduplicate rows with the same SeriesID on background merges.
+type GaugeSeriesRow struct {
+	SeriesID              uint64
+	ResourceAttributes    map[string]string
+	ResourceSchemaUrl     string
+	ScopeName             string
+	ScopeVersion          string
+	ScopeAttributes       map[string]string
+	ScopeDroppedAttrCount uint32
+	ScopeSchemaUrl        string
+	ServiceName           string
+	MetricName            string
+	MetricDescription     string
+	MetricUnit            string
+	Attributes            map[string]string
+}
+
+// SumSeriesRow holds the metadata that identifies a unique sum series.
+// It extends GaugeSeriesRow with sum-specific fields.
+type SumSeriesRow struct {
+	GaugeSeriesRow
+	AggregationTemporality int32
+	IsMonotonic            bool
+}
+
 // MetricsStore defines the interface for storing metrics in ClickHouse.
 type MetricsStore interface {
 	CreateTables(ctx context.Context) error
@@ -78,7 +105,9 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	ddls := []string{
 		createGaugeTableSQL,
+		createGaugeSeriesTableSQL,
 		createSumTableSQL,
+		createSumSeriesTableSQL,
 		createHistogramTableSQL,
 		createExponentialHistogramTableSQL,
 		createSummaryTableSQL,
