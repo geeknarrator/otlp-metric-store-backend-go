@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -64,8 +65,19 @@ type MetricsStore interface {
 }
 
 // ClickHouseMetricsStore implements MetricsStore using a ClickHouse connection.
+//
+// seenSeries is an in-process cache of SeriesIDs that have already been written
+// to ClickHouse. On a cache hit, the series insert is skipped entirely, reducing
+// duplicate writes to the ReplacingMergeTree series tables.
+//
+// The cache is intentionally unbounded — series cardinality is assumed to be low.
+// On process restart the cache is cold and series rows will be re-inserted once,
+// which is safe because ReplacingMergeTree handles deduplication.
+// In a multi-replica deployment each replica maintains its own cache; the
+// ReplacingMergeTree acts as the cross-replica correctness backstop.
 type ClickHouseMetricsStore struct {
-	conn driver.Conn
+	conn        driver.Conn
+	seenSeries  sync.Map // SeriesID uint64 → struct{}
 }
 
 // NewClickHouseMetricsStore creates a new ClickHouseMetricsStore connected to the given address.
@@ -131,15 +143,52 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 	return batch.Send()
 }
 
-// InsertGaugeSeries batch-inserts gauge series rows into otel_metrics_gauge_series.
-// Duplicate rows for the same SeriesID are expected and harmless — ReplacingMergeTree
-// deduplicates them asynchronously on background merges.
+// filterNewSeries returns only the rows whose SeriesID has not been seen before,
+// recording hits and misses on the provided counters.
+// Rows that pass the filter are added to the cache so subsequent calls skip them.
+func (s *ClickHouseMetricsStore) filterNewSeries(ids []uint64) (newIDs []uint64, hits, misses int) {
+	for _, id := range ids {
+		if _, loaded := s.seenSeries.LoadOrStore(id, struct{}{}); loaded {
+			hits++
+		} else {
+			misses++
+			newIDs = append(newIDs, id)
+		}
+	}
+	return
+}
+
+// InsertGaugeSeries batch-inserts gauge series rows into otel_metrics_gauge_series,
+// skipping any series whose SeriesID is already in the in-process cache.
+// Rows that do reach ClickHouse may still be duplicates across replicas or after
+// a restart — ReplacingMergeTree deduplicates them on background merges.
 func (s *ClickHouseMetricsStore) InsertGaugeSeries(ctx context.Context, rows []GaugeSeriesRow) error {
+	ids := make([]uint64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.SeriesID
+	}
+	newIDs, hits, misses := s.filterNewSeries(ids)
+	seriesCacheHitCounter.Add(ctx, int64(hits))
+	seriesCacheMissCounter.Add(ctx, int64(misses))
+
+	if len(newIDs) == 0 {
+		return nil
+	}
+
+	// Build a lookup set so we only append rows for new series.
+	newSet := make(map[uint64]struct{}, len(newIDs))
+	for _, id := range newIDs {
+		newSet[id] = struct{}{}
+	}
+
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge_series")
 	if err != nil {
 		return fmt.Errorf("preparing gauge series batch: %w", err)
 	}
 	for _, r := range rows {
+		if _, ok := newSet[r.SeriesID]; !ok {
+			continue
+		}
 		if err := batch.Append(
 			r.SeriesID,
 			r.ResourceAttributes,
@@ -181,15 +230,36 @@ func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) e
 	return batch.Send()
 }
 
-// InsertSumSeries batch-inserts sum series rows into otel_metrics_sum_series.
-// Duplicate rows for the same SeriesID are expected and harmless — ReplacingMergeTree
-// deduplicates them asynchronously on background merges.
+// InsertSumSeries batch-inserts sum series rows into otel_metrics_sum_series,
+// skipping any series whose SeriesID is already in the in-process cache.
+// Rows that do reach ClickHouse may still be duplicates across replicas or after
+// a restart — ReplacingMergeTree deduplicates them on background merges.
 func (s *ClickHouseMetricsStore) InsertSumSeries(ctx context.Context, rows []SumSeriesRow) error {
+	ids := make([]uint64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.SeriesID
+	}
+	newIDs, hits, misses := s.filterNewSeries(ids)
+	seriesCacheHitCounter.Add(ctx, int64(hits))
+	seriesCacheMissCounter.Add(ctx, int64(misses))
+
+	if len(newIDs) == 0 {
+		return nil
+	}
+
+	newSet := make(map[uint64]struct{}, len(newIDs))
+	for _, id := range newIDs {
+		newSet[id] = struct{}{}
+	}
+
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum_series")
 	if err != nil {
 		return fmt.Errorf("preparing sum series batch: %w", err)
 	}
 	for _, r := range rows {
+		if _, ok := newSet[r.SeriesID]; !ok {
+			continue
+		}
 		if err := batch.Append(
 			r.SeriesID,
 			r.ResourceAttributes,

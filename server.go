@@ -38,6 +38,8 @@ var (
 	sumDataPointsCounter      metric.Int64Counter
 	gaugeSeriesWrittenCounter metric.Int64Counter
 	sumSeriesWrittenCounter   metric.Int64Counter
+	seriesCacheHitCounter     metric.Int64Counter
+	seriesCacheMissCounter    metric.Int64Counter
 )
 
 func init() {
@@ -82,6 +84,24 @@ func init() {
 	sumSeriesWrittenCounter, err = meter.Int64Counter(
 		"com.dash0.otlp_metric_store.sum_series_written",
 		metric.WithDescription("Number of sum series rows written to ClickHouse (duplicates expected)"),
+		metric.WithUnit("{series}"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	seriesCacheHitCounter, err = meter.Int64Counter(
+		"com.dash0.otlp_metric_store.series_cache_hits",
+		metric.WithDescription("Number of series insert operations skipped due to in-process cache hit"),
+		metric.WithUnit("{series}"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	seriesCacheMissCounter, err = meter.Int64Counter(
+		"com.dash0.otlp_metric_store.series_cache_misses",
+		metric.WithDescription("Number of series insert operations that missed the in-process cache and were written to ClickHouse"),
 		metric.WithUnit("{series}"),
 	)
 	if err != nil {
