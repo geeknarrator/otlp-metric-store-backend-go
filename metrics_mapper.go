@@ -200,3 +200,67 @@ func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 	}
 	return rows
 }
+
+// GaugeSeriesRowsFrom derives unique GaugeSeriesRows from a slice of GaugeRows.
+// Rows with the same SeriesID within the batch are deduplicated so that only
+// one series row is written per unique series per batch.
+func GaugeSeriesRowsFrom(rows []GaugeRow) []GaugeSeriesRow {
+	seen := make(map[uint64]struct{}, len(rows))
+	series := make([]GaugeSeriesRow, 0, len(rows))
+	for _, r := range rows {
+		if _, ok := seen[r.SeriesID]; ok {
+			continue
+		}
+		seen[r.SeriesID] = struct{}{}
+		series = append(series, GaugeSeriesRow{
+			SeriesID:              r.SeriesID,
+			ResourceAttributes:    r.ResourceAttributes,
+			ResourceSchemaUrl:     r.ResourceSchemaUrl,
+			ScopeName:             r.ScopeName,
+			ScopeVersion:          r.ScopeVersion,
+			ScopeAttributes:       r.ScopeAttributes,
+			ScopeDroppedAttrCount: r.ScopeDroppedAttrCount,
+			ScopeSchemaUrl:        r.ScopeSchemaUrl,
+			ServiceName:           r.ServiceName,
+			MetricName:            r.MetricName,
+			MetricDescription:     r.MetricDescription,
+			MetricUnit:            r.MetricUnit,
+			Attributes:            r.Attributes,
+		})
+	}
+	return series
+}
+
+// SumSeriesRowsFrom derives unique SumSeriesRows from a slice of SumRows.
+// Rows with the same SeriesID within the batch are deduplicated so that only
+// one series row is written per unique series per batch.
+func SumSeriesRowsFrom(rows []SumRow) []SumSeriesRow {
+	seen := make(map[uint64]struct{}, len(rows))
+	series := make([]SumSeriesRow, 0, len(rows))
+	for _, r := range rows {
+		if _, ok := seen[r.SeriesID]; ok {
+			continue
+		}
+		seen[r.SeriesID] = struct{}{}
+		series = append(series, SumSeriesRow{
+			GaugeSeriesRow: GaugeSeriesRow{
+				SeriesID:              r.SeriesID,
+				ResourceAttributes:    r.ResourceAttributes,
+				ResourceSchemaUrl:     r.ResourceSchemaUrl,
+				ScopeName:             r.ScopeName,
+				ScopeVersion:          r.ScopeVersion,
+				ScopeAttributes:       r.ScopeAttributes,
+				ScopeDroppedAttrCount: r.ScopeDroppedAttrCount,
+				ScopeSchemaUrl:        r.ScopeSchemaUrl,
+				ServiceName:           r.ServiceName,
+				MetricName:            r.MetricName,
+				MetricDescription:     r.MetricDescription,
+				MetricUnit:            r.MetricUnit,
+				Attributes:            r.Attributes,
+			},
+			AggregationTemporality: r.AggregationTemporality,
+			IsMonotonic:            r.IsMonotonic,
+		})
+	}
+	return series
+}

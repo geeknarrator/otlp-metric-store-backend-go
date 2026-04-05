@@ -94,3 +94,114 @@ func TestComputeSeriesID_DifferentAttributeMapsBoundaryCollision(t *testing.T) {
 		t.Error("SeriesID attribute map boundary collision: resource and scope attrs produced the same ID")
 	}
 }
+
+// -- GaugeSeriesRowsFrom --
+
+func gaugeRow(seriesID uint64, svc, metric string) GaugeRow {
+	return GaugeRow{
+		SeriesID:    seriesID,
+		ServiceName: svc,
+		MetricName:  metric,
+		ResourceAttributes: map[string]string{"host": "a"},
+		ScopeAttributes:    map[string]string{},
+		Attributes:         map[string]string{},
+	}
+}
+
+func TestGaugeSeriesRowsFrom_DeduplicatesSameSeriesID(t *testing.T) {
+	rows := []GaugeRow{
+		gaugeRow(42, "svc", "cpu"),
+		gaugeRow(42, "svc", "cpu"),
+		gaugeRow(42, "svc", "cpu"),
+	}
+	series := GaugeSeriesRowsFrom(rows)
+	if len(series) != 1 {
+		t.Errorf("expected 1 unique series row, got %d", len(series))
+	}
+}
+
+func TestGaugeSeriesRowsFrom_PreservesDistinctSeriesIDs(t *testing.T) {
+	rows := []GaugeRow{
+		gaugeRow(1, "svc", "cpu"),
+		gaugeRow(2, "svc", "memory"),
+		gaugeRow(3, "svc", "disk"),
+	}
+	series := GaugeSeriesRowsFrom(rows)
+	if len(series) != 3 {
+		t.Errorf("expected 3 series rows, got %d", len(series))
+	}
+}
+
+func TestGaugeSeriesRowsFrom_EmptyInput(t *testing.T) {
+	series := GaugeSeriesRowsFrom(nil)
+	if len(series) != 0 {
+		t.Errorf("expected 0 series rows for nil input, got %d", len(series))
+	}
+}
+
+func TestGaugeSeriesRowsFrom_MetadataIsPreserved(t *testing.T) {
+	row := GaugeRow{
+		SeriesID:              99,
+		ServiceName:           "my-svc",
+		MetricName:            "latency",
+		MetricDescription:     "p99 latency",
+		MetricUnit:            "ms",
+		ResourceAttributes:    map[string]string{"host": "h1"},
+		ResourceSchemaUrl:     "https://schema.example.com",
+		ScopeName:             "my-scope",
+		ScopeVersion:          "1.0",
+		ScopeAttributes:       map[string]string{"env": "prod"},
+		ScopeDroppedAttrCount: 2,
+		ScopeSchemaUrl:        "https://scope.example.com",
+		Attributes:            map[string]string{"region": "eu"},
+	}
+	series := GaugeSeriesRowsFrom([]GaugeRow{row})
+	if len(series) != 1 {
+		t.Fatalf("expected 1 series row, got %d", len(series))
+	}
+	s := series[0]
+	if s.SeriesID != row.SeriesID { t.Errorf("SeriesID mismatch") }
+	if s.ServiceName != row.ServiceName { t.Errorf("ServiceName mismatch") }
+	if s.MetricName != row.MetricName { t.Errorf("MetricName mismatch") }
+	if s.MetricDescription != row.MetricDescription { t.Errorf("MetricDescription mismatch") }
+	if s.MetricUnit != row.MetricUnit { t.Errorf("MetricUnit mismatch") }
+	if s.ScopeName != row.ScopeName { t.Errorf("ScopeName mismatch") }
+	if s.ScopeDroppedAttrCount != row.ScopeDroppedAttrCount { t.Errorf("ScopeDroppedAttrCount mismatch") }
+}
+
+// -- SumSeriesRowsFrom --
+
+func sumRow(seriesID uint64, svc, metric string, temporality int32, monotonic bool) SumRow {
+	return SumRow{
+		GaugeRow:               gaugeRow(seriesID, svc, metric),
+		AggregationTemporality: temporality,
+		IsMonotonic:            monotonic,
+	}
+}
+
+func TestSumSeriesRowsFrom_DeduplicatesSameSeriesID(t *testing.T) {
+	rows := []SumRow{
+		sumRow(42, "svc", "requests", 2, true),
+		sumRow(42, "svc", "requests", 2, true),
+	}
+	series := SumSeriesRowsFrom(rows)
+	if len(series) != 1 {
+		t.Errorf("expected 1 unique series row, got %d", len(series))
+	}
+}
+
+func TestSumSeriesRowsFrom_SumSpecificFieldsPreserved(t *testing.T) {
+	rows := []SumRow{
+		sumRow(1, "svc", "requests", 2, true),
+	}
+	series := SumSeriesRowsFrom(rows)
+	if len(series) != 1 {
+		t.Fatalf("expected 1 series row, got %d", len(series))
+	}
+	if series[0].AggregationTemporality != 2 {
+		t.Errorf("expected AggregationTemporality=2, got %d", series[0].AggregationTemporality)
+	}
+	if !series[0].IsMonotonic {
+		t.Error("expected IsMonotonic=true")
+	}
+}
