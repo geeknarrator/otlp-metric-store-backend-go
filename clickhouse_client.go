@@ -10,31 +10,20 @@ import (
 )
 
 // GaugeRow represents a single gauge data point for ClickHouse insertion.
+// Metadata identifying the series is stored separately in otel_metrics_gauge_series.
 type GaugeRow struct {
-	SeriesID              uint64
-	ResourceAttributes    map[string]string
-	ResourceSchemaUrl     string
-	ScopeName             string
-	ScopeVersion          string
-	ScopeAttributes       map[string]string
-	ScopeDroppedAttrCount uint32
-	ScopeSchemaUrl        string
-	ServiceName           string
-	MetricName            string
-	MetricDescription     string
-	MetricUnit            string
-	Attributes            map[string]string
-	StartTimeUnix         time.Time
-	TimeUnix              time.Time
-	Value                 float64
-	Flags                 uint32
+	SeriesID      uint64
+	StartTimeUnix time.Time
+	TimeUnix      time.Time
+	Value         float64
+	Flags         uint32
 }
 
 // SumRow represents a single sum data point for ClickHouse insertion.
+// AggregationTemporality and IsMonotonic are series-level properties stored
+// in otel_metrics_sum_series, not repeated per data point.
 type SumRow struct {
 	GaugeRow
-	AggregationTemporality int32
-	IsMonotonic            bool
 }
 
 // GaugeSeriesRow holds the metadata that identifies a unique gauge series.
@@ -130,18 +119,7 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 	}
 	for _, r := range rows {
 		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
+			r.SeriesID,
 			r.StartTimeUnix,
 			r.TimeUnix,
 			r.Value,
@@ -191,24 +169,11 @@ func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) e
 	}
 	for _, r := range rows {
 		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
+			r.SeriesID,
 			r.StartTimeUnix,
 			r.TimeUnix,
 			r.Value,
 			r.Flags,
-			r.AggregationTemporality,
-			r.IsMonotonic,
 		); err != nil {
 			return fmt.Errorf("appending sum row: %w", err)
 		}

@@ -26,7 +26,7 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 		rm := request.GetResourceMetrics()
 
 		if gaugeRows := MapGaugeRows(rm); len(gaugeRows) > 0 {
-			if err := m.store.InsertGaugeSeries(ctx, GaugeSeriesRowsFrom(gaugeRows)); err != nil {
+			if err := m.store.InsertGaugeSeries(ctx, MapGaugeSeriesRows(rm)); err != nil {
 				return nil, err
 			}
 			if err := m.store.InsertGauge(ctx, gaugeRows); err != nil {
@@ -34,7 +34,7 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 			}
 		}
 		if sumRows := MapSumRows(rm); len(sumRows) > 0 {
-			if err := m.store.InsertSumSeries(ctx, SumSeriesRowsFrom(sumRows)); err != nil {
+			if err := m.store.InsertSumSeries(ctx, MapSumSeriesRows(rm)); err != nil {
 				return nil, err
 			}
 			if err := m.store.InsertSum(ctx, sumRows); err != nil {

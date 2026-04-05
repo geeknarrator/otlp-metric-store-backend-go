@@ -2,6 +2,10 @@ package main
 
 import (
 	"testing"
+
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
 func TestComputeSeriesID_Stable(t *testing.T) {
@@ -95,106 +99,178 @@ func TestComputeSeriesID_DifferentAttributeMapsBoundaryCollision(t *testing.T) {
 	}
 }
 
-// -- GaugeSeriesRowsFrom --
+// -- MapGaugeSeriesRows --
 
-func gaugeRow(seriesID uint64, svc, metric string) GaugeRow {
-	return GaugeRow{
-		SeriesID:    seriesID,
-		ServiceName: svc,
-		MetricName:  metric,
-		ResourceAttributes: map[string]string{"host": "a"},
-		ScopeAttributes:    map[string]string{},
-		Attributes:         map[string]string{},
+func gaugeResourceMetrics(svc, metricName string, dpAttrs map[string]string, numDataPoints int) []*metricspb.ResourceMetrics {
+	dps := make([]*metricspb.NumberDataPoint, numDataPoints)
+	for i := range dps {
+		kv := make([]*commonpb.KeyValue, 0, len(dpAttrs))
+		for k, v := range dpAttrs {
+			kv = append(kv, &commonpb.KeyValue{
+				Key:   k,
+				Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: v}},
+			})
+		}
+		dps[i] = &metricspb.NumberDataPoint{
+			Attributes: kv,
+			Value:      &metricspb.NumberDataPoint_AsDouble{AsDouble: float64(i)},
+		}
+	}
+	return []*metricspb.ResourceMetrics{
+		{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: svc}}},
+				},
+			},
+			ScopeMetrics: []*metricspb.ScopeMetrics{
+				{
+					Scope: &commonpb.InstrumentationScope{Name: "test-scope"},
+					Metrics: []*metricspb.Metric{
+						{
+							Name:        metricName,
+							Description: metricName + " description",
+							Unit:        "1",
+							Data:        &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: dps}},
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
-func TestGaugeSeriesRowsFrom_DeduplicatesSameSeriesID(t *testing.T) {
-	rows := []GaugeRow{
-		gaugeRow(42, "svc", "cpu"),
-		gaugeRow(42, "svc", "cpu"),
-		gaugeRow(42, "svc", "cpu"),
-	}
-	series := GaugeSeriesRowsFrom(rows)
+func TestMapGaugeSeriesRows_DeduplicatesWithinBatch(t *testing.T) {
+	// 3 data points for the same series — only 1 series row expected.
+	rm := gaugeResourceMetrics("svc", "cpu", map[string]string{"cpu": "0"}, 3)
+	series := MapGaugeSeriesRows(rm)
 	if len(series) != 1 {
-		t.Errorf("expected 1 unique series row, got %d", len(series))
+		t.Errorf("expected 1 series row, got %d", len(series))
 	}
 }
 
-func TestGaugeSeriesRowsFrom_PreservesDistinctSeriesIDs(t *testing.T) {
-	rows := []GaugeRow{
-		gaugeRow(1, "svc", "cpu"),
-		gaugeRow(2, "svc", "memory"),
-		gaugeRow(3, "svc", "disk"),
+func TestMapGaugeSeriesRows_PreservesDistinctSeries(t *testing.T) {
+	// Two metrics = two distinct series.
+	rm := []*metricspb.ResourceMetrics{
+		{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "svc"}}},
+				},
+			},
+			ScopeMetrics: []*metricspb.ScopeMetrics{
+				{
+					Scope: &commonpb.InstrumentationScope{Name: "scope"},
+					Metrics: []*metricspb.Metric{
+						{Name: "cpu", Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{}}}}},
+						{Name: "memory", Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{DataPoints: []*metricspb.NumberDataPoint{{}}}}},
+					},
+				},
+			},
+		},
 	}
-	series := GaugeSeriesRowsFrom(rows)
-	if len(series) != 3 {
-		t.Errorf("expected 3 series rows, got %d", len(series))
+	series := MapGaugeSeriesRows(rm)
+	if len(series) != 2 {
+		t.Errorf("expected 2 series rows, got %d", len(series))
 	}
 }
 
-func TestGaugeSeriesRowsFrom_EmptyInput(t *testing.T) {
-	series := GaugeSeriesRowsFrom(nil)
+func TestMapGaugeSeriesRows_MetadataIsPreserved(t *testing.T) {
+	rm := gaugeResourceMetrics("my-svc", "latency", map[string]string{"region": "eu"}, 1)
+	rm[0].ScopeMetrics[0].Metrics[0].Description = "p99 latency"
+	rm[0].ScopeMetrics[0].Metrics[0].Unit = "ms"
+
+	series := MapGaugeSeriesRows(rm)
+	if len(series) != 1 {
+		t.Fatalf("expected 1 series row, got %d", len(series))
+	}
+	s := series[0]
+	if s.ServiceName != "my-svc" {
+		t.Errorf("ServiceName: want my-svc, got %s", s.ServiceName)
+	}
+	if s.MetricName != "latency" {
+		t.Errorf("MetricName: want latency, got %s", s.MetricName)
+	}
+	if s.MetricDescription != "p99 latency" {
+		t.Errorf("MetricDescription: want 'p99 latency', got %s", s.MetricDescription)
+	}
+	if s.MetricUnit != "ms" {
+		t.Errorf("MetricUnit: want ms, got %s", s.MetricUnit)
+	}
+	if s.Attributes["region"] != "eu" {
+		t.Errorf("Attributes[region]: want eu, got %s", s.Attributes["region"])
+	}
+}
+
+func TestMapGaugeSeriesRows_EmptyInput(t *testing.T) {
+	series := MapGaugeSeriesRows(nil)
 	if len(series) != 0 {
 		t.Errorf("expected 0 series rows for nil input, got %d", len(series))
 	}
 }
 
-func TestGaugeSeriesRowsFrom_MetadataIsPreserved(t *testing.T) {
-	row := GaugeRow{
-		SeriesID:              99,
-		ServiceName:           "my-svc",
-		MetricName:            "latency",
-		MetricDescription:     "p99 latency",
-		MetricUnit:            "ms",
-		ResourceAttributes:    map[string]string{"host": "h1"},
-		ResourceSchemaUrl:     "https://schema.example.com",
-		ScopeName:             "my-scope",
-		ScopeVersion:          "1.0",
-		ScopeAttributes:       map[string]string{"env": "prod"},
-		ScopeDroppedAttrCount: 2,
-		ScopeSchemaUrl:        "https://scope.example.com",
-		Attributes:            map[string]string{"region": "eu"},
+// -- MapSumSeriesRows --
+
+func TestMapSumSeriesRows_DeduplicatesWithinBatch(t *testing.T) {
+	rm := []*metricspb.ResourceMetrics{
+		{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "svc"}}},
+				},
+			},
+			ScopeMetrics: []*metricspb.ScopeMetrics{
+				{
+					Scope: &commonpb.InstrumentationScope{Name: "scope"},
+					Metrics: []*metricspb.Metric{
+						{
+							Name: "requests",
+							Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
+								AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+								IsMonotonic:            true,
+								DataPoints: []*metricspb.NumberDataPoint{
+									{Value: &metricspb.NumberDataPoint_AsDouble{AsDouble: 1}},
+									{Value: &metricspb.NumberDataPoint_AsDouble{AsDouble: 2}},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
 	}
-	series := GaugeSeriesRowsFrom([]GaugeRow{row})
+	series := MapSumSeriesRows(rm)
 	if len(series) != 1 {
-		t.Fatalf("expected 1 series row, got %d", len(series))
-	}
-	s := series[0]
-	if s.SeriesID != row.SeriesID { t.Errorf("SeriesID mismatch") }
-	if s.ServiceName != row.ServiceName { t.Errorf("ServiceName mismatch") }
-	if s.MetricName != row.MetricName { t.Errorf("MetricName mismatch") }
-	if s.MetricDescription != row.MetricDescription { t.Errorf("MetricDescription mismatch") }
-	if s.MetricUnit != row.MetricUnit { t.Errorf("MetricUnit mismatch") }
-	if s.ScopeName != row.ScopeName { t.Errorf("ScopeName mismatch") }
-	if s.ScopeDroppedAttrCount != row.ScopeDroppedAttrCount { t.Errorf("ScopeDroppedAttrCount mismatch") }
-}
-
-// -- SumSeriesRowsFrom --
-
-func sumRow(seriesID uint64, svc, metric string, temporality int32, monotonic bool) SumRow {
-	return SumRow{
-		GaugeRow:               gaugeRow(seriesID, svc, metric),
-		AggregationTemporality: temporality,
-		IsMonotonic:            monotonic,
+		t.Errorf("expected 1 series row, got %d", len(series))
 	}
 }
 
-func TestSumSeriesRowsFrom_DeduplicatesSameSeriesID(t *testing.T) {
-	rows := []SumRow{
-		sumRow(42, "svc", "requests", 2, true),
-		sumRow(42, "svc", "requests", 2, true),
+func TestMapSumSeriesRows_SumSpecificFieldsPreserved(t *testing.T) {
+	rm := []*metricspb.ResourceMetrics{
+		{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "svc"}}},
+				},
+			},
+			ScopeMetrics: []*metricspb.ScopeMetrics{
+				{
+					Scope: &commonpb.InstrumentationScope{Name: "scope"},
+					Metrics: []*metricspb.Metric{
+						{
+							Name: "requests",
+							Data: &metricspb.Metric_Sum{Sum: &metricspb.Sum{
+								AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+								IsMonotonic:            true,
+								DataPoints:             []*metricspb.NumberDataPoint{{}},
+							}},
+						},
+					},
+				},
+			},
+		},
 	}
-	series := SumSeriesRowsFrom(rows)
-	if len(series) != 1 {
-		t.Errorf("expected 1 unique series row, got %d", len(series))
-	}
-}
-
-func TestSumSeriesRowsFrom_SumSpecificFieldsPreserved(t *testing.T) {
-	rows := []SumRow{
-		sumRow(1, "svc", "requests", 2, true),
-	}
-	series := SumSeriesRowsFrom(rows)
+	series := MapSumSeriesRows(rm)
 	if len(series) != 1 {
 		t.Fatalf("expected 1 series row, got %d", len(series))
 	}

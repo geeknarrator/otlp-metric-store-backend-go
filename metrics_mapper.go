@@ -107,8 +107,43 @@ func numberDataPointValue(dp *metricspb.NumberDataPoint) float64 {
 
 // MapGaugeRows converts an ExportMetricsServiceRequest into GaugeRows
 // for all Gauge metrics found in the request.
+// MapGaugeRows maps all gauge data points from the request into slim GaugeRows
+// containing only SeriesID, timestamps, value and flags.
 func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 	var rows []GaugeRow
+	for _, rm := range resourceMetrics {
+		svcName := serviceName(rm.GetResource())
+		resAttrs := kvToMap(rm.GetResource().GetAttributes())
+
+		for _, sm := range rm.GetScopeMetrics() {
+			scope := sm.GetScope()
+			scopeAttrs := kvToMap(scope.GetAttributes())
+
+			for _, metric := range sm.GetMetrics() {
+				if metric.GetGauge() == nil {
+					continue
+				}
+				for _, dp := range metric.GetGauge().GetDataPoints() {
+					dpAttrs := kvToMap(dp.GetAttributes())
+					rows = append(rows, GaugeRow{
+						SeriesID:      computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs),
+						StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+						TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+						Value:         numberDataPointValue(dp),
+						Flags:         dp.GetFlags(),
+					})
+				}
+			}
+		}
+	}
+	return rows
+}
+
+// MapGaugeSeriesRows maps all gauge metrics from the request into unique
+// GaugeSeriesRows, deduplicated by SeriesID within the batch.
+func MapGaugeSeriesRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeSeriesRow {
+	seen := make(map[uint64]struct{})
+	var rows []GaugeSeriesRow
 	for _, rm := range resourceMetrics {
 		svcName := serviceName(rm.GetResource())
 		resAttrs := kvToMap(rm.GetResource().GetAttributes())
@@ -119,14 +154,18 @@ func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 			scopeAttrs := kvToMap(scope.GetAttributes())
 
 			for _, metric := range sm.GetMetrics() {
-				gauge := metric.GetGauge()
-				if gauge == nil {
+				if metric.GetGauge() == nil {
 					continue
 				}
-				for _, dp := range gauge.GetDataPoints() {
+				for _, dp := range metric.GetGauge().GetDataPoints() {
 					dpAttrs := kvToMap(dp.GetAttributes())
-					rows = append(rows, GaugeRow{
-						SeriesID:              computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs),
+					seriesID := computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs)
+					if _, ok := seen[seriesID]; ok {
+						continue
+					}
+					seen[seriesID] = struct{}{}
+					rows = append(rows, GaugeSeriesRow{
+						SeriesID:              seriesID,
 						ResourceAttributes:    resAttrs,
 						ResourceSchemaUrl:     resSchemaUrl,
 						ScopeName:             scope.GetName(),
@@ -139,10 +178,6 @@ func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 						MetricDescription:     metric.GetDescription(),
 						MetricUnit:            metric.GetUnit(),
 						Attributes:            dpAttrs,
-						StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
-						TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
-						Value:                 numberDataPointValue(dp),
-						Flags:                 dp.GetFlags(),
 					})
 				}
 			}
@@ -151,10 +186,45 @@ func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 	return rows
 }
 
-// MapSumRows converts an ExportMetricsServiceRequest into SumRows
-// for all Sum metrics found in the request.
+// MapSumRows maps all sum data points from the request into slim SumRows
+// containing only SeriesID, timestamps, value and flags.
 func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 	var rows []SumRow
+	for _, rm := range resourceMetrics {
+		svcName := serviceName(rm.GetResource())
+		resAttrs := kvToMap(rm.GetResource().GetAttributes())
+
+		for _, sm := range rm.GetScopeMetrics() {
+			scope := sm.GetScope()
+			scopeAttrs := kvToMap(scope.GetAttributes())
+
+			for _, metric := range sm.GetMetrics() {
+				if metric.GetSum() == nil {
+					continue
+				}
+				for _, dp := range metric.GetSum().GetDataPoints() {
+					dpAttrs := kvToMap(dp.GetAttributes())
+					rows = append(rows, SumRow{
+						GaugeRow: GaugeRow{
+							SeriesID:      computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs),
+							StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+							TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+							Value:         numberDataPointValue(dp),
+							Flags:         dp.GetFlags(),
+						},
+					})
+				}
+			}
+		}
+	}
+	return rows
+}
+
+// MapSumSeriesRows maps all sum metrics from the request into unique
+// SumSeriesRows, deduplicated by SeriesID within the batch.
+func MapSumSeriesRows(resourceMetrics []*metricspb.ResourceMetrics) []SumSeriesRow {
+	seen := make(map[uint64]struct{})
+	var rows []SumSeriesRow
 	for _, rm := range resourceMetrics {
 		svcName := serviceName(rm.GetResource())
 		resAttrs := kvToMap(rm.GetResource().GetAttributes())
@@ -171,9 +241,14 @@ func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 				}
 				for _, dp := range sum.GetDataPoints() {
 					dpAttrs := kvToMap(dp.GetAttributes())
-					rows = append(rows, SumRow{
-						GaugeRow: GaugeRow{
-							SeriesID:              computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs),
+					seriesID := computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs)
+					if _, ok := seen[seriesID]; ok {
+						continue
+					}
+					seen[seriesID] = struct{}{}
+					rows = append(rows, SumSeriesRow{
+						GaugeSeriesRow: GaugeSeriesRow{
+							SeriesID:              seriesID,
 							ResourceAttributes:    resAttrs,
 							ResourceSchemaUrl:     resSchemaUrl,
 							ScopeName:             scope.GetName(),
@@ -186,10 +261,6 @@ func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 							MetricDescription:     metric.GetDescription(),
 							MetricUnit:            metric.GetUnit(),
 							Attributes:            dpAttrs,
-							StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
-							TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
-							Value:                 numberDataPointValue(dp),
-							Flags:                 dp.GetFlags(),
 						},
 						AggregationTemporality: int32(sum.GetAggregationTemporality()),
 						IsMonotonic:            sum.GetIsMonotonic(),
@@ -199,68 +270,4 @@ func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 		}
 	}
 	return rows
-}
-
-// GaugeSeriesRowsFrom derives unique GaugeSeriesRows from a slice of GaugeRows.
-// Rows with the same SeriesID within the batch are deduplicated so that only
-// one series row is written per unique series per batch.
-func GaugeSeriesRowsFrom(rows []GaugeRow) []GaugeSeriesRow {
-	seen := make(map[uint64]struct{}, len(rows))
-	series := make([]GaugeSeriesRow, 0, len(rows))
-	for _, r := range rows {
-		if _, ok := seen[r.SeriesID]; ok {
-			continue
-		}
-		seen[r.SeriesID] = struct{}{}
-		series = append(series, GaugeSeriesRow{
-			SeriesID:              r.SeriesID,
-			ResourceAttributes:    r.ResourceAttributes,
-			ResourceSchemaUrl:     r.ResourceSchemaUrl,
-			ScopeName:             r.ScopeName,
-			ScopeVersion:          r.ScopeVersion,
-			ScopeAttributes:       r.ScopeAttributes,
-			ScopeDroppedAttrCount: r.ScopeDroppedAttrCount,
-			ScopeSchemaUrl:        r.ScopeSchemaUrl,
-			ServiceName:           r.ServiceName,
-			MetricName:            r.MetricName,
-			MetricDescription:     r.MetricDescription,
-			MetricUnit:            r.MetricUnit,
-			Attributes:            r.Attributes,
-		})
-	}
-	return series
-}
-
-// SumSeriesRowsFrom derives unique SumSeriesRows from a slice of SumRows.
-// Rows with the same SeriesID within the batch are deduplicated so that only
-// one series row is written per unique series per batch.
-func SumSeriesRowsFrom(rows []SumRow) []SumSeriesRow {
-	seen := make(map[uint64]struct{}, len(rows))
-	series := make([]SumSeriesRow, 0, len(rows))
-	for _, r := range rows {
-		if _, ok := seen[r.SeriesID]; ok {
-			continue
-		}
-		seen[r.SeriesID] = struct{}{}
-		series = append(series, SumSeriesRow{
-			GaugeSeriesRow: GaugeSeriesRow{
-				SeriesID:              r.SeriesID,
-				ResourceAttributes:    r.ResourceAttributes,
-				ResourceSchemaUrl:     r.ResourceSchemaUrl,
-				ScopeName:             r.ScopeName,
-				ScopeVersion:          r.ScopeVersion,
-				ScopeAttributes:       r.ScopeAttributes,
-				ScopeDroppedAttrCount: r.ScopeDroppedAttrCount,
-				ScopeSchemaUrl:        r.ScopeSchemaUrl,
-				ServiceName:           r.ServiceName,
-				MetricName:            r.MetricName,
-				MetricDescription:     r.MetricDescription,
-				MetricUnit:            r.MetricUnit,
-				Attributes:            r.Attributes,
-			},
-			AggregationTemporality: r.AggregationTemporality,
-			IsMonotonic:            r.IsMonotonic,
-		})
-	}
-	return series
 }

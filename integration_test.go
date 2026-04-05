@@ -147,28 +147,23 @@ func TestInsertGauge(t *testing.T) {
 		},
 	}
 
-	rows := MapGaugeRows(resourceMetrics)
-	if err := store.InsertGauge(ctx, rows); err != nil {
+	gaugeRows := MapGaugeRows(resourceMetrics)
+	if err := store.InsertGauge(ctx, gaugeRows); err != nil {
 		t.Fatalf("inserting gauge rows: %v", err)
 	}
 
 	var (
-		serviceName string
-		metricName  string
-		value       float64
+		seriesID uint64
+		value    float64
 	)
 	err := store.conn.QueryRow(ctx,
-		"SELECT ServiceName, MetricName, Value FROM otel_metrics_gauge WHERE MetricName = 'cpu.utilization'",
-	).Scan(&serviceName, &metricName, &value)
+		"SELECT SeriesID, Value FROM otel_metrics_gauge",
+	).Scan(&seriesID, &value)
 	if err != nil {
 		t.Fatalf("querying gauge: %v", err)
 	}
-
-	if serviceName != "test-service" {
-		t.Errorf("expected ServiceName=test-service, got %s", serviceName)
-	}
-	if metricName != "cpu.utilization" {
-		t.Errorf("expected MetricName=cpu.utilization, got %s", metricName)
+	if seriesID != gaugeRows[0].SeriesID {
+		t.Errorf("expected SeriesID=%d, got %d", gaugeRows[0].SeriesID, seriesID)
 	}
 	if value != 42.5 {
 		t.Errorf("expected Value=42.5, got %f", value)
@@ -230,39 +225,26 @@ func TestInsertSum(t *testing.T) {
 		},
 	}
 
-	rows := MapSumRows(resourceMetrics)
-	if err := store.InsertSum(ctx, rows); err != nil {
+	sumRows := MapSumRows(resourceMetrics)
+	if err := store.InsertSum(ctx, sumRows); err != nil {
 		t.Fatalf("inserting sum rows: %v", err)
 	}
 
 	var (
-		serviceName            string
-		metricName             string
-		value                  float64
-		aggregationTemporality int32
-		isMonotonic            bool
+		seriesID uint64
+		value    float64
 	)
 	err := store.conn.QueryRow(ctx,
-		"SELECT ServiceName, MetricName, Value, AggregationTemporality, IsMonotonic FROM otel_metrics_sum WHERE MetricName = 'http.requests.total'",
-	).Scan(&serviceName, &metricName, &value, &aggregationTemporality, &isMonotonic)
+		"SELECT SeriesID, Value FROM otel_metrics_sum",
+	).Scan(&seriesID, &value)
 	if err != nil {
 		t.Fatalf("querying sum: %v", err)
 	}
-
-	if serviceName != "test-service" {
-		t.Errorf("expected ServiceName=test-service, got %s", serviceName)
-	}
-	if metricName != "http.requests.total" {
-		t.Errorf("expected MetricName=http.requests.total, got %s", metricName)
+	if seriesID != sumRows[0].SeriesID {
+		t.Errorf("expected SeriesID=%d, got %d", sumRows[0].SeriesID, seriesID)
 	}
 	if value != 1234 {
 		t.Errorf("expected Value=1234, got %f", value)
-	}
-	if aggregationTemporality != 2 {
-		t.Errorf("expected AggregationTemporality=2, got %d", aggregationTemporality)
-	}
-	if !isMonotonic {
-		t.Errorf("expected IsMonotonic=true, got false")
 	}
 }
 
@@ -313,8 +295,7 @@ func TestInsertGaugeSeries(t *testing.T) {
 		},
 	}
 
-	gaugeRows := MapGaugeRows(resourceMetrics)
-	seriesRows := GaugeSeriesRowsFrom(gaugeRows)
+	seriesRows := MapGaugeSeriesRows(resourceMetrics)
 
 	if len(seriesRows) != 1 {
 		t.Fatalf("expected 1 deduplicated series row before insert, got %d", len(seriesRows))
@@ -393,8 +374,7 @@ func TestInsertSumSeries(t *testing.T) {
 		},
 	}
 
-	sumRows := MapSumRows(resourceMetrics)
-	seriesRows := SumSeriesRowsFrom(sumRows)
+	seriesRows := MapSumSeriesRows(resourceMetrics)
 
 	if err := store.InsertSumSeries(ctx, seriesRows); err != nil {
 		t.Fatalf("inserting sum series rows: %v", err)
@@ -498,30 +478,35 @@ func TestGRPCToClickHouse(t *testing.T) {
 	}
 
 	// Verify the data point landed in ClickHouse.
-	var (
-		svcName    string
-		metricName string
-		value      float64
-	)
+	var value float64
 	err = store.conn.QueryRow(ctx,
-		"SELECT ServiceName, MetricName, Value FROM otel_metrics_gauge WHERE MetricName = 'e2e.gauge'",
-	).Scan(&svcName, &metricName, &value)
+		"SELECT Value FROM otel_metrics_gauge",
+	).Scan(&value)
 	if err != nil {
 		t.Fatalf("querying gauge data: %v", err)
-	}
-	if svcName != "e2e-service" {
-		t.Errorf("expected ServiceName=e2e-service, got %s", svcName)
 	}
 	if value != 99.9 {
 		t.Errorf("expected Value=99.9, got %f", value)
 	}
 
-	// Verify the series row landed in the series table.
-	var seriesServiceName string
+	// Verify the series row landed and the SeriesID matches between data and series tables.
+	var (
+		seriesIDFromData   uint64
+		seriesIDFromSeries uint64
+		seriesServiceName  string
+	)
 	if err := store.conn.QueryRow(ctx,
-		"SELECT ServiceName FROM otel_metrics_gauge_series WHERE MetricName = 'e2e.gauge'",
-	).Scan(&seriesServiceName); err != nil {
+		"SELECT SeriesID FROM otel_metrics_gauge",
+	).Scan(&seriesIDFromData); err != nil {
+		t.Fatalf("querying SeriesID from gauge data: %v", err)
+	}
+	if err := store.conn.QueryRow(ctx,
+		"SELECT SeriesID, ServiceName FROM otel_metrics_gauge_series WHERE MetricName = 'e2e.gauge'",
+	).Scan(&seriesIDFromSeries, &seriesServiceName); err != nil {
 		t.Fatalf("querying gauge series: %v", err)
+	}
+	if seriesIDFromData != seriesIDFromSeries {
+		t.Errorf("SeriesID mismatch: data table has %d, series table has %d", seriesIDFromData, seriesIDFromSeries)
 	}
 	if seriesServiceName != "e2e-service" {
 		t.Errorf("expected ServiceName=e2e-service in series table, got %s", seriesServiceName)
