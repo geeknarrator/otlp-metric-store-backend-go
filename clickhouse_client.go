@@ -143,12 +143,13 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 	return batch.Send()
 }
 
-// filterNewSeries returns only the rows whose SeriesID has not been seen before,
-// recording hits and misses on the provided counters.
-// Rows that pass the filter are added to the cache so subsequent calls skip them.
+// filterNewSeries returns only the IDs that have not yet been written to ClickHouse
+// (i.e. are absent from the in-process cache), counting hits and misses.
+// It does NOT update the cache — call markSeriesSeen after a successful write
+// so that a failed batch.Send() does not permanently suppress the series.
 func (s *ClickHouseMetricsStore) filterNewSeries(ids []uint64) (newIDs []uint64, hits, misses int) {
 	for _, id := range ids {
-		if _, loaded := s.seenSeries.LoadOrStore(id, struct{}{}); loaded {
+		if _, ok := s.seenSeries.Load(id); ok {
 			hits++
 		} else {
 			misses++
@@ -156,6 +157,15 @@ func (s *ClickHouseMetricsStore) filterNewSeries(ids []uint64) (newIDs []uint64,
 		}
 	}
 	return
+}
+
+// markSeriesSeen records the given IDs as successfully written to ClickHouse.
+// Must be called only after a successful batch.Send() to avoid cache poisoning
+// on write failures.
+func (s *ClickHouseMetricsStore) markSeriesSeen(ids []uint64) {
+	for _, id := range ids {
+		s.seenSeries.Store(id, struct{}{})
+	}
 }
 
 // InsertGaugeSeries batch-inserts gauge series rows into otel_metrics_gauge_series,
@@ -207,7 +217,12 @@ func (s *ClickHouseMetricsStore) InsertGaugeSeries(ctx context.Context, rows []G
 			return fmt.Errorf("appending gauge series row: %w", err)
 		}
 	}
-	return batch.Send()
+	if err := batch.Send(); err != nil {
+		return err
+	}
+	s.markSeriesSeen(newIDs)
+	gaugeSeriesWrittenCounter.Add(ctx, int64(len(newIDs)))
+	return nil
 }
 
 // InsertSum batch-inserts sum rows into otel_metrics_sum.
@@ -280,7 +295,12 @@ func (s *ClickHouseMetricsStore) InsertSumSeries(ctx context.Context, rows []Sum
 			return fmt.Errorf("appending sum series row: %w", err)
 		}
 	}
-	return batch.Send()
+	if err := batch.Send(); err != nil {
+		return err
+	}
+	s.markSeriesSeen(newIDs)
+	sumSeriesWrittenCounter.Add(ctx, int64(len(newIDs)))
+	return nil
 }
 
 // Close closes the underlying ClickHouse connection.

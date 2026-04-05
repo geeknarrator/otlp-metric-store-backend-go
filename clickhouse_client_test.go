@@ -2,8 +2,8 @@ package main
 
 import "testing"
 
-// filterNewSeries only requires a zero-value ClickHouseMetricsStore — no
-// ClickHouse connection is needed for these tests.
+// filterNewSeries and markSeriesSeen only require a zero-value ClickHouseMetricsStore —
+// no ClickHouse connection is needed for these tests.
 
 func TestFilterNewSeries_FirstCallIsMiss(t *testing.T) {
 	s := &ClickHouseMetricsStore{}
@@ -21,7 +21,7 @@ func TestFilterNewSeries_FirstCallIsMiss(t *testing.T) {
 
 func TestFilterNewSeries_SecondCallWithSameIDsIsHit(t *testing.T) {
 	s := &ClickHouseMetricsStore{}
-	s.filterNewSeries([]uint64{1, 2, 3}) // populate cache
+	s.markSeriesSeen([]uint64{1, 2, 3}) // simulate a prior successful write
 
 	newIDs, hits, misses := s.filterNewSeries([]uint64{1, 2, 3})
 	if hits != 3 {
@@ -37,7 +37,7 @@ func TestFilterNewSeries_SecondCallWithSameIDsIsHit(t *testing.T) {
 
 func TestFilterNewSeries_MixedNewAndSeen(t *testing.T) {
 	s := &ClickHouseMetricsStore{}
-	s.filterNewSeries([]uint64{1, 2}) // seed 1 and 2 into cache
+	s.markSeriesSeen([]uint64{1, 2}) // seed 1 and 2 into cache
 
 	newIDs, hits, misses := s.filterNewSeries([]uint64{1, 2, 3, 4})
 	if hits != 2 {
@@ -64,13 +64,27 @@ func TestFilterNewSeries_EmptyInput(t *testing.T) {
 	}
 }
 
-func TestFilterNewSeries_CacheIsPopulatedAfterMiss(t *testing.T) {
+func TestMarkSeriesSeen_PopulatesCacheForSubsequentFilters(t *testing.T) {
 	s := &ClickHouseMetricsStore{}
-	s.filterNewSeries([]uint64{42})
+	s.markSeriesSeen([]uint64{42})
 
-	// 42 should now be in the cache — a second call must report a hit.
+	// 42 should now be in the cache — filterNewSeries must report a hit.
 	_, hits, _ := s.filterNewSeries([]uint64{42})
 	if hits != 1 {
-		t.Errorf("expected ID to be cached after first miss, got %d hits", hits)
+		t.Errorf("expected ID to be cached after markSeriesSeen, got %d hits", hits)
+	}
+}
+
+func TestFilterNewSeries_DoesNotPopulateCache(t *testing.T) {
+	s := &ClickHouseMetricsStore{}
+	s.filterNewSeries([]uint64{99}) // miss, but cache must NOT be updated
+
+	// Without markSeriesSeen, a second filter call must still report a miss.
+	_, hits, misses := s.filterNewSeries([]uint64{99})
+	if hits != 0 {
+		t.Errorf("filterNewSeries must not populate the cache; expected 0 hits, got %d", hits)
+	}
+	if misses != 1 {
+		t.Errorf("expected 1 miss, got %d", misses)
 	}
 }

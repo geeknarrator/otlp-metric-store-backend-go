@@ -30,7 +30,6 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 				slog.ErrorContext(ctx, "Failed to insert gauge series", slog.Any("error", err))
 				return nil, err
 			}
-			gaugeSeriesWrittenCounter.Add(ctx, int64(len(gaugeSeriesRows)))
 
 			if err := m.store.InsertGauge(ctx, gaugeRows); err != nil {
 				slog.ErrorContext(ctx, "Failed to insert gauge data points", slog.Any("error", err))
@@ -45,7 +44,6 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 				slog.ErrorContext(ctx, "Failed to insert sum series", slog.Any("error", err))
 				return nil, err
 			}
-			sumSeriesWrittenCounter.Add(ctx, int64(len(sumSeriesRows)))
 
 			if err := m.store.InsertSum(ctx, sumRows); err != nil {
 				slog.ErrorContext(ctx, "Failed to insert sum data points", slog.Any("error", err))
