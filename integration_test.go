@@ -75,7 +75,9 @@ func TestCreateTables(t *testing.T) {
 
 	expectedTables := []string{
 		"otel_metrics_gauge",
+		"otel_metrics_gauge_series",
 		"otel_metrics_sum",
+		"otel_metrics_sum_series",
 		"otel_metrics_histogram",
 		"otel_metrics_exponential_histogram",
 		"otel_metrics_summary",
@@ -264,6 +266,167 @@ func TestInsertSum(t *testing.T) {
 	}
 }
 
+func TestInsertGaugeSeries(t *testing.T) {
+	store, cleanup := setupClickHouse(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := store.CreateTables(ctx); err != nil {
+		t.Fatalf("creating tables: %v", err)
+	}
+
+	now := uint64(time.Now().UnixNano())
+	resourceMetrics := []*metricspb.ResourceMetrics{
+		{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "test-service"}}},
+				},
+			},
+			ScopeMetrics: []*metricspb.ScopeMetrics{
+				{
+					Scope: &commonpb.InstrumentationScope{Name: "test-scope", Version: "1.0.0"},
+					Metrics: []*metricspb.Metric{
+						{
+							Name:        "cpu.utilization",
+							Description: "CPU utilization percentage",
+							Unit:        "%",
+							Data: &metricspb.Metric_Gauge{
+								Gauge: &metricspb.Gauge{
+									DataPoints: []*metricspb.NumberDataPoint{
+										{
+											TimeUnixNano: now,
+											Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 42.5},
+										},
+										// Second data point for the same series — only one series row should be written.
+										{
+											TimeUnixNano: now + 1000,
+											Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 43.0},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	gaugeRows := MapGaugeRows(resourceMetrics)
+	seriesRows := GaugeSeriesRowsFrom(gaugeRows)
+
+	if len(seriesRows) != 1 {
+		t.Fatalf("expected 1 deduplicated series row before insert, got %d", len(seriesRows))
+	}
+
+	if err := store.InsertGaugeSeries(ctx, seriesRows); err != nil {
+		t.Fatalf("inserting gauge series rows: %v", err)
+	}
+
+	var (
+		seriesID    uint64
+		serviceName string
+		metricName  string
+		metricUnit  string
+	)
+	err := store.conn.QueryRow(ctx,
+		"SELECT SeriesID, ServiceName, MetricName, MetricUnit FROM otel_metrics_gauge_series WHERE MetricName = 'cpu.utilization'",
+	).Scan(&seriesID, &serviceName, &metricName, &metricUnit)
+	if err != nil {
+		t.Fatalf("querying gauge series: %v", err)
+	}
+	if seriesID != seriesRows[0].SeriesID {
+		t.Errorf("expected SeriesID=%d, got %d", seriesRows[0].SeriesID, seriesID)
+	}
+	if serviceName != "test-service" {
+		t.Errorf("expected ServiceName=test-service, got %s", serviceName)
+	}
+	if metricName != "cpu.utilization" {
+		t.Errorf("expected MetricName=cpu.utilization, got %s", metricName)
+	}
+	if metricUnit != "%" {
+		t.Errorf("expected MetricUnit=%%, got %s", metricUnit)
+	}
+}
+
+func TestInsertSumSeries(t *testing.T) {
+	store, cleanup := setupClickHouse(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := store.CreateTables(ctx); err != nil {
+		t.Fatalf("creating tables: %v", err)
+	}
+
+	now := uint64(time.Now().UnixNano())
+	resourceMetrics := []*metricspb.ResourceMetrics{
+		{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "test-service"}}},
+				},
+			},
+			ScopeMetrics: []*metricspb.ScopeMetrics{
+				{
+					Scope: &commonpb.InstrumentationScope{Name: "test-scope"},
+					Metrics: []*metricspb.Metric{
+						{
+							Name: "http.requests.total",
+							Unit: "{request}",
+							Data: &metricspb.Metric_Sum{
+								Sum: &metricspb.Sum{
+									AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+									IsMonotonic:            true,
+									DataPoints: []*metricspb.NumberDataPoint{
+										{
+											TimeUnixNano: now,
+											Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 100},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sumRows := MapSumRows(resourceMetrics)
+	seriesRows := SumSeriesRowsFrom(sumRows)
+
+	if err := store.InsertSumSeries(ctx, seriesRows); err != nil {
+		t.Fatalf("inserting sum series rows: %v", err)
+	}
+
+	var (
+		seriesID               uint64
+		serviceName            string
+		metricName             string
+		aggregationTemporality int32
+		isMonotonic            bool
+	)
+	err := store.conn.QueryRow(ctx,
+		"SELECT SeriesID, ServiceName, MetricName, AggregationTemporality, IsMonotonic FROM otel_metrics_sum_series WHERE MetricName = 'http.requests.total'",
+	).Scan(&seriesID, &serviceName, &metricName, &aggregationTemporality, &isMonotonic)
+	if err != nil {
+		t.Fatalf("querying sum series: %v", err)
+	}
+	if seriesID != seriesRows[0].SeriesID {
+		t.Errorf("expected SeriesID=%d, got %d", seriesRows[0].SeriesID, seriesID)
+	}
+	if serviceName != "test-service" {
+		t.Errorf("expected ServiceName=test-service, got %s", serviceName)
+	}
+	if aggregationTemporality != 2 {
+		t.Errorf("expected AggregationTemporality=2, got %d", aggregationTemporality)
+	}
+	if !isMonotonic {
+		t.Error("expected IsMonotonic=true")
+	}
+}
+
 func TestGRPCToClickHouse(t *testing.T) {
 	store, cleanup := setupClickHouse(t)
 	defer cleanup()
@@ -334,7 +497,7 @@ func TestGRPCToClickHouse(t *testing.T) {
 		t.Fatalf("exporting metrics via grpc: %v", err)
 	}
 
-	// Verify the metric landed in ClickHouse.
+	// Verify the data point landed in ClickHouse.
 	var (
 		svcName    string
 		metricName string
@@ -344,12 +507,23 @@ func TestGRPCToClickHouse(t *testing.T) {
 		"SELECT ServiceName, MetricName, Value FROM otel_metrics_gauge WHERE MetricName = 'e2e.gauge'",
 	).Scan(&svcName, &metricName, &value)
 	if err != nil {
-		t.Fatalf("querying clickhouse: %v", err)
+		t.Fatalf("querying gauge data: %v", err)
 	}
 	if svcName != "e2e-service" {
 		t.Errorf("expected ServiceName=e2e-service, got %s", svcName)
 	}
 	if value != 99.9 {
 		t.Errorf("expected Value=99.9, got %f", value)
+	}
+
+	// Verify the series row landed in the series table.
+	var seriesServiceName string
+	if err := store.conn.QueryRow(ctx,
+		"SELECT ServiceName FROM otel_metrics_gauge_series WHERE MetricName = 'e2e.gauge'",
+	).Scan(&seriesServiceName); err != nil {
+		t.Fatalf("querying gauge series: %v", err)
+	}
+	if seriesServiceName != "e2e-service" {
+		t.Errorf("expected ServiceName=e2e-service in series table, got %s", seriesServiceName)
 	}
 }
