@@ -1,63 +1,89 @@
-# OTLP Metric Storage (Go)
+# OTLP Metric Store — Go Backend
 
-## Introduction
-This take-home assignment is designed to give you an opportunity to demonstrate your skills and experience in
-building a small backend application. We expect you to spend 3-4 hours on this assignment (using AI coding agents).
-If you find yourself spending more time than that, please stop and submit what you have. We are not looking for a
-complete solution, but rather a demonstration of your skills and experience.
+A gRPC backend that receives OpenTelemetry metrics via the OTLP protocol and stores them in ClickHouse.
 
-To submit your solution, please create a public GitHub repository and send us the link. Please include a `README.md` file
-with instructions on how to run your application.
+Gauge and Sum metric types are supported. Each metric type is stored across two tables:
 
-## Overview
-The goal of this assignment is to build a simple backend application that receives [metric datapoints](https://opentelemetry.io/docs/concepts/signals/metrics/)
-on a gRPC endpoint and processes them, before storing in ClickHouse.
-Current state is that we have a gRPC endpoint for receiving metrics, and Gauge and Sum type get correctly converted to
-records and inserted into ClickHouse. This is tested with both unit- and integration-tests.
+- **Data table** (`otel_metrics_gauge`, `otel_metrics_sum`) — one row per data point, containing only `SeriesID`, timestamps, value, and flags. Partitioned by day on `TimeUnix`, ordered by `(SeriesID, TimeUnix)` for efficient time-range queries.
+- **Series table** (`otel_metrics_gauge_series`, `otel_metrics_sum_series`) — one row per unique metric series, containing all metadata (service name, resource/scope/data-point attributes, metric name, description, unit). Uses `ReplacingMergeTree` for background deduplication.
 
-What we're looking for is to extract meta-data about the metrics into a separate table, which will then act as a 'lookup'
-table, and that actual data-points just get stored as value + timestamp and with a reference to the lookup table.
+`SeriesID` is a stable `uint64` hash computed deterministically from the series' identifying dimensions (service name, metric name, and all attribute maps), requiring no database round-trip.
 
-Think about and keep in mind the following things:
-- How to do the reference between tables?
-- How to efficiently store the meta-data in ClickHouse?
-- All data should be stored in such a way that full table scans are never needed, under the assumption data always gets queried for a specific time-frame
-- Other than time-frame, there are no other mandatory filters for querying
-- While you can assume cardinality of the metrics is 'low', e.g. Resources (Attributes) are likely to change over time 
+## Prerequisites
 
-Your solution should take into account high throughput, both in number of messages and the number of metrics / data-points per message.
+- Go 1.26+
+- A running ClickHouse instance (v23+ recommended)
+- Docker (for running integration tests via testcontainers)
 
-Feel free to use the existing scaffoling in this folder. Of course, you can also change anything else as you see fit.
+## Build
 
-## Technology Constraints
-- Your Go program should compile using standard Go SDK, and be compatible with Go 1.26.
-- Use any additional libraries you want and need.
-
-## Notes
-- As this assignment is for the role of a Staff / Senior Product Engineer, we expect you to pay some attention to maintainability and operability of the solution. For example:
-  - Consistent terminology usage
-  - Validation of the behaviour
-  - Include signals / events to help in debugging
-- Assume that this application will be deployed to production. Build it accordingly.
-
-## Usage
-
-Build the application:
 ```shell
 go build ./...
 ```
 
-Run the application:
+## Run
+
 ```shell
-go run ./...
+go run ./... \
+  -listenAddr=localhost:4317 \
+  -clickhouseAddr=localhost:9000 \
+  -clickhouseDatabase=default \
+  -clickhouseUsername=default \
+  -clickhousePassword=yourpassword
 ```
 
-Run tests
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-listenAddr` | `localhost:4317` | gRPC listen address |
+| `-maxReceiveMessageSize` | `16777216` | Max gRPC message size in bytes (16 MiB) |
+| `-clickhouseAddr` | `localhost:9000` | ClickHouse native protocol address |
+| `-clickhouseDatabase` | `default` | ClickHouse database name |
+| `-clickhouseUsername` | `default` | ClickHouse username |
+| `-clickhousePassword` | _(empty)_ | ClickHouse password |
+
+On startup the application:
+1. Connects to ClickHouse and verifies the connection
+2. Creates all required tables if they don't exist (`CREATE TABLE IF NOT EXISTS`)
+3. Starts listening for OTLP metric exports on the gRPC endpoint
+
+## Run tests
+
+Unit and integration tests run together. Integration tests spin up a real ClickHouse instance via Docker (testcontainers) automatically — Docker must be running.
+
 ```shell
-go test ./...
+go test -count=1 ./...
 ```
 
-## References
+For verbose integration test output:
 
-- [OpenTelemetry Metrics](https://opentelemetry.io/docs/concepts/signals/metrics/)
-- [OpenTelemetry Protocol (OTLP)](https://github.com/open-telemetry/opentelemetry-proto)
+```shell
+go test -count=1 -v ./...
+```
+
+## Observability
+
+The application instruments itself with OpenTelemetry (exported to stdout by default) and emits the following signals:
+
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `com.dash0.otlp_metric_store.export_requests` | Total OTLP export requests received |
+| `com.dash0.otlp_metric_store.gauge_data_points` | Gauge data points written to ClickHouse |
+| `com.dash0.otlp_metric_store.sum_data_points` | Sum data points written to ClickHouse |
+| `com.dash0.otlp_metric_store.gauge_series_written` | Gauge series rows written (duplicates expected, deduplicated by ClickHouse) |
+| `com.dash0.otlp_metric_store.sum_series_written` | Sum series rows written (duplicates expected, deduplicated by ClickHouse) |
+
+### Logs
+
+Structured logs are emitted via `log/slog` at the following points:
+
+- Application startup and ClickHouse readiness
+- Per-request debug log on every received export
+- Error logs with full context on any ClickHouse insert failure
+
+### Traces
+
+All inbound gRPC requests are traced via `otelgrpc`. Trace context is propagated to log records and metric exemplars.

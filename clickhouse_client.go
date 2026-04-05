@@ -92,7 +92,7 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 	return &ClickHouseMetricsStore{conn: conn}, nil
 }
 
-// CreateTables executes DDL for all 5 metric tables.
+// CreateTables executes DDL for all metric data and series tables.
 func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	ddls := []string{
 		createGaugeTableSQL,

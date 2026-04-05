@@ -105,8 +105,6 @@ func numberDataPointValue(dp *metricspb.NumberDataPoint) float64 {
 	}
 }
 
-// MapGaugeRows converts an ExportMetricsServiceRequest into GaugeRows
-// for all Gauge metrics found in the request.
 // MapGaugeRows maps all gauge data points from the request into slim GaugeRows
 // containing only SeriesID, timestamps, value and flags.
 func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {

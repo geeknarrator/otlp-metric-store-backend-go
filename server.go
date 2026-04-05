@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -18,23 +19,71 @@ import (
 )
 
 var (
-	listenAddr            = flag.String("listenAddr", "localhost:4317", "The listen address")
+	listenAddr            = flag.String("listenAddr", "localhost:4317", "The gRPC listen address")
 	maxReceiveMessageSize = flag.Int("maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
+	clickhouseAddr        = flag.String("clickhouseAddr", "localhost:9000", "The ClickHouse server address")
+	clickhouseDatabase    = flag.String("clickhouseDatabase", "default", "The ClickHouse database name")
+	clickhouseUsername    = flag.String("clickhouseUsername", "default", "The ClickHouse username")
+	clickhousePassword    = flag.String("clickhousePassword", "", "The ClickHouse password")
 )
 
-const name = "dash0.com/otlp-log-processor-backend"
+const name = "dash0.com/otlp-metric-store-backend"
 
 var (
-	meter                  = otel.Meter(name)
-	logger                 = otelslog.NewLogger(name)
-	metricsReceivedCounter metric.Int64Counter
+	meter  = otel.Meter(name)
+	logger = otelslog.NewLogger(name)
+
+	metricsReceivedCounter    metric.Int64Counter
+	gaugeDataPointsCounter    metric.Int64Counter
+	sumDataPointsCounter      metric.Int64Counter
+	gaugeSeriesWrittenCounter metric.Int64Counter
+	sumSeriesWrittenCounter   metric.Int64Counter
 )
 
 func init() {
 	var err error
-	metricsReceivedCounter, err = meter.Int64Counter("com.dash0.homeexercise.metrics.received",
-		metric.WithDescription("The number of metrics received by otlp-metrics-processor-backend"),
-		metric.WithUnit("{metric}"))
+
+	metricsReceivedCounter, err = meter.Int64Counter(
+		"com.dash0.otlp_metric_store.export_requests",
+		metric.WithDescription("Number of ExportMetricsServiceRequests received"),
+		metric.WithUnit("{request}"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	gaugeDataPointsCounter, err = meter.Int64Counter(
+		"com.dash0.otlp_metric_store.gauge_data_points",
+		metric.WithDescription("Number of gauge data points written to ClickHouse"),
+		metric.WithUnit("{datapoint}"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	sumDataPointsCounter, err = meter.Int64Counter(
+		"com.dash0.otlp_metric_store.sum_data_points",
+		metric.WithDescription("Number of sum data points written to ClickHouse"),
+		metric.WithUnit("{datapoint}"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	gaugeSeriesWrittenCounter, err = meter.Int64Counter(
+		"com.dash0.otlp_metric_store.gauge_series_written",
+		metric.WithDescription("Number of gauge series rows written to ClickHouse (duplicates expected)"),
+		metric.WithUnit("{series}"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	sumSeriesWrittenCounter, err = meter.Int64Counter(
+		"com.dash0.otlp_metric_store.sum_series_written",
+		metric.WithDescription("Number of sum series rows written to ClickHouse (duplicates expected)"),
+		metric.WithUnit("{series}"),
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -55,13 +104,26 @@ func run() (err error) {
 	if err != nil {
 		return
 	}
-
-	// Handle shutdown properly so nothing leaks.
 	defer func() {
 		err = errors.Join(err, otelShutdown(context.Background()))
 	}()
 
 	flag.Parse()
+
+	ctx := context.Background()
+
+	store, err := NewClickHouseMetricsStore(ctx, *clickhouseAddr, *clickhouseDatabase, *clickhouseUsername, *clickhousePassword)
+	if err != nil {
+		return fmt.Errorf("connecting to ClickHouse: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, store.Close())
+	}()
+
+	if err := store.CreateTables(ctx); err != nil {
+		return fmt.Errorf("creating ClickHouse tables: %w", err)
+	}
+	logger.Info("ClickHouse tables ready")
 
 	slog.Debug("Starting listener", slog.String("listenAddr", *listenAddr))
 	listener, err := net.Listen("tcp", *listenAddr)
@@ -74,9 +136,9 @@ func run() (err error) {
 		grpc.MaxRecvMsgSize(*maxReceiveMessageSize),
 		grpc.Creds(insecure.NewCredentials()),
 	)
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(*listenAddr, nil))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(store))
 
-	slog.Debug("Starting gRPC server")
+	slog.Info("gRPC server listening", slog.String("addr", *listenAddr))
 
 	return grpcServer.Serve(listener)
 }

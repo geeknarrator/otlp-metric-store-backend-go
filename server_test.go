@@ -64,12 +64,11 @@ func TestMetricsServiceServer_Export(t *testing.T) {
 }
 
 func server() (colmetricspb.MetricsServiceClient, func()) {
-	addr := "localhost:4317"
 	buffer := 101024 * 1024
 	lis := bufconn.Listen(buffer)
 
 	baseServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(baseServer, newServer(addr, nil))
+	colmetricspb.RegisterMetricsServiceServer(baseServer, newServer(nil))
 	go func() {
 		if err := baseServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)
