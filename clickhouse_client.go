@@ -68,7 +68,9 @@ type SumSeriesRow struct {
 type MetricsStore interface {
 	CreateTables(ctx context.Context) error
 	InsertGauge(ctx context.Context, rows []GaugeRow) error
+	InsertGaugeSeries(ctx context.Context, rows []GaugeSeriesRow) error
 	InsertSum(ctx context.Context, rows []SumRow) error
+	InsertSumSeries(ctx context.Context, rows []SumSeriesRow) error
 	Close() error
 }
 
@@ -151,6 +153,36 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 	return batch.Send()
 }
 
+// InsertGaugeSeries batch-inserts gauge series rows into otel_metrics_gauge_series.
+// Duplicate rows for the same SeriesID are expected and harmless — ReplacingMergeTree
+// deduplicates them asynchronously on background merges.
+func (s *ClickHouseMetricsStore) InsertGaugeSeries(ctx context.Context, rows []GaugeSeriesRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge_series")
+	if err != nil {
+		return fmt.Errorf("preparing gauge series batch: %w", err)
+	}
+	for _, r := range rows {
+		if err := batch.Append(
+			r.SeriesID,
+			r.ResourceAttributes,
+			r.ResourceSchemaUrl,
+			r.ScopeName,
+			r.ScopeVersion,
+			r.ScopeAttributes,
+			r.ScopeDroppedAttrCount,
+			r.ScopeSchemaUrl,
+			r.ServiceName,
+			r.MetricName,
+			r.MetricDescription,
+			r.MetricUnit,
+			r.Attributes,
+		); err != nil {
+			return fmt.Errorf("appending gauge series row: %w", err)
+		}
+	}
+	return batch.Send()
+}
+
 // InsertSum batch-inserts sum rows into otel_metrics_sum.
 func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) error {
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
@@ -179,6 +211,38 @@ func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) e
 			r.IsMonotonic,
 		); err != nil {
 			return fmt.Errorf("appending sum row: %w", err)
+		}
+	}
+	return batch.Send()
+}
+
+// InsertSumSeries batch-inserts sum series rows into otel_metrics_sum_series.
+// Duplicate rows for the same SeriesID are expected and harmless — ReplacingMergeTree
+// deduplicates them asynchronously on background merges.
+func (s *ClickHouseMetricsStore) InsertSumSeries(ctx context.Context, rows []SumSeriesRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum_series")
+	if err != nil {
+		return fmt.Errorf("preparing sum series batch: %w", err)
+	}
+	for _, r := range rows {
+		if err := batch.Append(
+			r.SeriesID,
+			r.ResourceAttributes,
+			r.ResourceSchemaUrl,
+			r.ScopeName,
+			r.ScopeVersion,
+			r.ScopeAttributes,
+			r.ScopeDroppedAttrCount,
+			r.ScopeSchemaUrl,
+			r.ServiceName,
+			r.MetricName,
+			r.MetricDescription,
+			r.MetricUnit,
+			r.Attributes,
+			r.AggregationTemporality,
+			r.IsMonotonic,
+		); err != nil {
+			return fmt.Errorf("appending sum series row: %w", err)
 		}
 	}
 	return batch.Send()
