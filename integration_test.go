@@ -510,3 +510,60 @@ func TestGRPCToClickHouse(t *testing.T) {
 		t.Errorf("expected ServiceName=e2e-service in series table, got %s", seriesServiceName)
 	}
 }
+
+func TestSeriesCachePreventsDuplicateInserts(t *testing.T) {
+	store, cleanup := setupClickHouse(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := store.CreateTables(ctx); err != nil {
+		t.Fatalf("creating tables: %v", err)
+	}
+
+	rm := []*metricspb.ResourceMetrics{
+		{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "cache-test-service"}}},
+				},
+			},
+			ScopeMetrics: []*metricspb.ScopeMetrics{
+				{
+					Scope: &commonpb.InstrumentationScope{Name: "cache-scope"},
+					Metrics: []*metricspb.Metric{
+						{
+							Name: "cache.test.metric",
+							Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{
+								DataPoints: []*metricspb.NumberDataPoint{
+									{TimeUnixNano: uint64(time.Now().UnixNano()), Value: &metricspb.NumberDataPoint_AsDouble{AsDouble: 1.0}},
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	seriesRows := MapGaugeSeriesRows(rm)
+
+	// First insert — cache miss, row lands in ClickHouse.
+	if err := store.InsertGaugeSeries(ctx, seriesRows); err != nil {
+		t.Fatalf("first InsertGaugeSeries: %v", err)
+	}
+
+	// Second insert of the same series — cache hit, nothing written to ClickHouse.
+	if err := store.InsertGaugeSeries(ctx, seriesRows); err != nil {
+		t.Fatalf("second InsertGaugeSeries: %v", err)
+	}
+
+	// Use FINAL to force deduplication at query time and assert exactly one row.
+	var count uint64
+	if err := store.conn.QueryRow(ctx,
+		"SELECT count() FROM otel_metrics_gauge_series FINAL WHERE MetricName = 'cache.test.metric'",
+	).Scan(&count); err != nil {
+		t.Fatalf("querying series count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 series row after cache hit suppressed second insert, got %d", count)
+	}
+}

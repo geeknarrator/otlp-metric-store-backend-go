@@ -9,6 +9,15 @@ Gauge and Sum metric types are supported. Each metric type is stored across two 
 
 `SeriesID` is a stable `uint64` hash computed deterministically from the series' identifying dimensions (service name, metric name, and all attribute maps), requiring no database round-trip.
 
+### Series deduplication
+
+Series metadata is written only once per unique series using a two-layer strategy:
+
+1. **In-process cache** — each instance maintains a `sync.Map` of seen `SeriesID`s. On a cache hit the series insert is skipped entirely, so steady-state throughput produces zero redundant series writes per replica.
+2. **`ReplacingMergeTree`** — any duplicates that do reach ClickHouse (on startup before the cache warms, or across replicas) are deduplicated asynchronously on background merges.
+
+Cache hits and misses are tracked via OTel counters. On process restart the cache is cold and each series is re-inserted once, which is safe.
+
 ## Prerequisites
 
 - Go 1.26+
@@ -73,8 +82,10 @@ The application instruments itself with OpenTelemetry (exported to stdout by def
 | `com.dash0.otlp_metric_store.export_requests` | Total OTLP export requests received |
 | `com.dash0.otlp_metric_store.gauge_data_points` | Gauge data points written to ClickHouse |
 | `com.dash0.otlp_metric_store.sum_data_points` | Sum data points written to ClickHouse |
-| `com.dash0.otlp_metric_store.gauge_series_written` | Gauge series rows written (duplicates expected, deduplicated by ClickHouse) |
-| `com.dash0.otlp_metric_store.sum_series_written` | Sum series rows written (duplicates expected, deduplicated by ClickHouse) |
+| `com.dash0.otlp_metric_store.gauge_series_written` | Gauge series rows written to ClickHouse (after cache filtering) |
+| `com.dash0.otlp_metric_store.sum_series_written` | Sum series rows written to ClickHouse (after cache filtering) |
+| `com.dash0.otlp_metric_store.series_cache_hits` | Series insert operations skipped due to in-process cache hit |
+| `com.dash0.otlp_metric_store.series_cache_misses` | Series insert operations that missed the cache and were written to ClickHouse |
 
 ### Logs
 
