@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
+	xxhash "github.com/cespare/xxhash/v2"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
@@ -50,6 +52,42 @@ func anyValueToString(v *commonpb.AnyValue) string {
 	}
 }
 
+// computeSeriesID returns a stable uint64 hash that uniquely identifies a
+// metric series by its identifying dimensions: service name, metric name,
+// resource attributes, scope attributes, and data point attributes.
+//
+// Map keys are sorted before hashing to ensure the result is independent of
+// Go's non-deterministic map iteration order.
+//
+// Fields are separated by null bytes to prevent collisions between inputs
+// like ("a", "bc") and ("ab", "c").
+func computeSeriesID(serviceName, metricName string, resourceAttrs, scopeAttrs, dpAttrs map[string]string) uint64 {
+	h := xxhash.New()
+	writeField := func(s string) {
+		h.Write([]byte(s))
+		h.Write([]byte{0x00})
+	}
+	writeMap := func(m map[string]string) {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			writeField(k)
+			writeField(m[k])
+		}
+		h.Write([]byte{0xff}) // separator between attribute maps
+	}
+
+	writeField(serviceName)
+	writeField(metricName)
+	writeMap(resourceAttrs)
+	writeMap(scopeAttrs)
+	writeMap(dpAttrs)
+	return h.Sum64()
+}
+
 // nanosToTime converts a uint64 nanoseconds-since-epoch to time.Time.
 func nanosToTime(nanos uint64) time.Time {
 	return time.Unix(0, int64(nanos))
@@ -86,7 +124,9 @@ func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 					continue
 				}
 				for _, dp := range gauge.GetDataPoints() {
+					dpAttrs := kvToMap(dp.GetAttributes())
 					rows = append(rows, GaugeRow{
+						SeriesID:              computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs),
 						ResourceAttributes:    resAttrs,
 						ResourceSchemaUrl:     resSchemaUrl,
 						ScopeName:             scope.GetName(),
@@ -98,7 +138,7 @@ func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 						MetricName:            metric.GetName(),
 						MetricDescription:     metric.GetDescription(),
 						MetricUnit:            metric.GetUnit(),
-						Attributes:            kvToMap(dp.GetAttributes()),
+						Attributes:            dpAttrs,
 						StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
 						TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
 						Value:                 numberDataPointValue(dp),
@@ -130,8 +170,10 @@ func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 					continue
 				}
 				for _, dp := range sum.GetDataPoints() {
+					dpAttrs := kvToMap(dp.GetAttributes())
 					rows = append(rows, SumRow{
 						GaugeRow: GaugeRow{
+							SeriesID:              computeSeriesID(svcName, metric.GetName(), resAttrs, scopeAttrs, dpAttrs),
 							ResourceAttributes:    resAttrs,
 							ResourceSchemaUrl:     resSchemaUrl,
 							ScopeName:             scope.GetName(),
@@ -143,7 +185,7 @@ func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 							MetricName:            metric.GetName(),
 							MetricDescription:     metric.GetDescription(),
 							MetricUnit:            metric.GetUnit(),
-							Attributes:            kvToMap(dp.GetAttributes()),
+							Attributes:            dpAttrs,
 							StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
 							TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
 							Value:                 numberDataPointValue(dp),

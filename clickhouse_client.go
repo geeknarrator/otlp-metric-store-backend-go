@@ -11,6 +11,7 @@ import (
 
 // GaugeRow represents a single gauge data point for ClickHouse insertion.
 type GaugeRow struct {
+	SeriesID              uint64
 	ResourceAttributes    map[string]string
 	ResourceSchemaUrl     string
 	ScopeName             string
